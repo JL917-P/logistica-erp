@@ -1,0 +1,23 @@
+{
+  "name": "logistica-erp",
+  "version": "1.0.0",
+  "description": "ERP moderno para análisis de archivos Excel",
+  "engines": {
+    "node": ">=18.18"
+  },
+  "main": "index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install",
+    "build": "npm ci --prefix frontend && npm run build --prefix frontend && npm ci --prefix backend",
+    "start": "npm start --prefix backend"
+  },
+  "keywords": ["erp", "excel", "logistica"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

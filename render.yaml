@@ -1,0 +1,13 @@
+# Opcional: despliegue con Blueprint en Render.com
+services:
+  - type: web
+    name: logistica-erp
+    runtime: node
+    buildCommand: npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 20.18.0
+      - key: NODE_ENV
+        value: production
