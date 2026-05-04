@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { Menu } from 'lucide-react';
 import Sidebar from './components/layout/Sidebar';
 import FileUploader from './components/FileUploader';
 import AnalysisResults from './components/AnalysisResults';
@@ -14,9 +15,18 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  const changeView = useCallback((id) => {
+    setActiveView(id);
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 1023px)').matches) {
+      setSidebarOpen(false);
+    }
+  }, []);
+
   useEffect(() => {
     const currentData = analysisData[activeView];
-    if (currentData) {
+    if (!currentData) return;
+    if (typeof window === 'undefined') return;
+    if (window.matchMedia('(min-width: 1024px)').matches) {
       setSidebarOpen(false);
     }
   }, [analysisData, activeView]);
@@ -45,7 +55,7 @@ function App() {
         </h2>
         <p className="text-gray-600">
           {section === 'upload'
-            ? 'Analiza estados por pedido. Se extraen centro, fecha, vendedor, cliente, producto, cantidad, destino y estado. Solo muestra Autorizado y Atendido parcialmente.'
+            ? 'Pestañas por zona (Lima/Callao, Provincia, Sin clasificar), luego Ejecutado y Rechazado; cantidad, atendido y pendiente.'
             : 'Exclusivo Makro: agrupa datos por tienda, NRO_OC y producto, sumando UNDS, PESO, SC50 y PH.'}
         </p>
       </div>
@@ -64,13 +74,22 @@ function App() {
       <Sidebar
         isOpen={sidebarOpen}
         activeView={activeView}
-        onViewChange={setActiveView}
+        onViewChange={changeView}
         onToggle={() => setSidebarOpen(!sidebarOpen)}
       />
 
-      <div className="flex-1 flex flex-col transition-all duration-300">
+      <div className="flex-1 flex flex-col transition-all duration-300 min-w-0">
         <main className="flex-1 overflow-y-auto bg-gray-50">
           <div className="p-6">
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(true)}
+              className="fixed bottom-5 left-5 z-50 lg:hidden p-3 rounded-full bg-white border border-gray-200 text-gray-700 shadow-lg hover:bg-gray-50"
+              aria-label="Abrir menú lateral"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+
             {error && (
               <div className="mb-6 p-4 bg-red-50 border-l-4 border-red-500 rounded-r-lg shadow-sm">
                 <div className="flex items-center">

@@ -19,9 +19,101 @@ const HEADER_LABELS = {
   cliente: 'CLIENTE',
   producto: 'PRODUCTO',
   cantidad: 'CANTIDAD',
+  atendido: 'ATENDIDO',
+  pendiente: 'PENDIENTE',
   destino: 'DESTINO',
   estado: 'ESTADO'
 };
+
+/** Orden de columnas en tabla; atendido/pendiente van después de cantidad. */
+const LOGISTICS_TABLE_COLUMN_ORDER = [
+  'centro',
+  'fecha',
+  'vendedor',
+  'cliente',
+  'producto',
+  'cantidad',
+  'atendido',
+  'pendiente',
+  'destino',
+  'estado'
+];
+
+/** Pestañas Ejecutado / Rechazado: tabla simple solo lectura (sin mapas ni distrito). */
+const VISTA_ESTADO_LECTURA_KEYS = [
+  'fecha',
+  'vendedor',
+  'cliente',
+  'producto',
+  'cantidad',
+  'atendido',
+  'pendiente',
+  'destino',
+  'estado'
+];
+
+function parseAnalysisNumber(raw) {
+  if (raw === '' || raw == null) return 0;
+  const n = Number(String(raw).replace(/\s/g, '').replace(',', '.'));
+  return Number.isNaN(n) ? 0 : n;
+}
+
+/**
+ * Asegura columnas ATENDIDO y PENDIENTE en la tabla (pendiente = max(cantidad - atendido, 0)).
+ * Útil si la API/cache aún devuelve el esquema antiguo sin esas llaves en `columns`.
+ */
+function normalizePedidoLogisticsSheet(sheet) {
+  if (!sheet || !Array.isArray(sheet.columns) || !Array.isArray(sheet.logisticsRows)) {
+    return sheet;
+  }
+
+  const colByKey = new Map(sheet.columns.map((c) => [c.key, c]));
+
+  const logisticsRows = sheet.logisticsRows.map((row) => {
+    const cantidad = parseAnalysisNumber(row.cantidad);
+    const atNum =
+      row.atendido !== '' && row.atendido != null ? parseAnalysisNumber(row.atendido) : 0;
+    const pendiente = Math.max(cantidad - atNum, 0);
+    return {
+      ...row,
+      atendido: atNum,
+      pendiente
+    };
+  });
+
+  const columns = [];
+  const seen = new Set();
+
+  for (const key of LOGISTICS_TABLE_COLUMN_ORDER) {
+    if (key === 'atendido' || key === 'pendiente') {
+      columns.push(
+        colByKey.get(key) || {
+          key,
+          name: HEADER_LABELS[key] || key
+        }
+      );
+      seen.add(key);
+      continue;
+    }
+    if (colByKey.has(key)) {
+      columns.push(colByKey.get(key));
+      seen.add(key);
+    }
+  }
+
+  for (const c of sheet.columns) {
+    if (!seen.has(c.key)) {
+      columns.push(c);
+      seen.add(c.key);
+    }
+  }
+
+  return {
+    ...sheet,
+    columns,
+    logisticsRows
+  };
+}
 
 /** Verde cabecera tipo hoja de cálculo */
 const HEADER_BG = '#1a6c47';
@@ -97,14 +189,62 @@ function mergeDistritoSave(row, dist, sheetRows, prev) {
   return base;
 }
 
+function sanitizeEstadoCellRawUi(value) {
+  if (value == null || value === '') return '';
+  let s = String(value)
+    .replace(/^\ufeff/g, '')
+    .replace(/[\u200B-\u200D\uFEFF\u2060]/g, '')
+    .replace(/\u00a0/g, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+
 function normalizeEstado(val) {
-  if (val == null || val === '') return '';
-  return String(val)
+  const pre = sanitizeEstadoCellRawUi(val);
+  if (!pre) return '';
+  return pre
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .trim()
     .replace(/\s+/g, ' ');
+}
+
+/** Parcial / plural / orden tipo "PARCIALMENTE ATENDIDOS". */
+function isAtendidoParcialNorm(n) {
+  if (!n) return false;
+  const partial = n.includes('parcialmente') || /\bparcial\b/.test(n);
+  if (!partial) return false;
+  return /\batendid(o|os|a|as)\b/.test(n);
+}
+
+const FORMS_AUTORIZADO_UI = new Set(['autorizado', 'autorizada', 'autorizados', 'autorizadas']);
+const FORMS_EJECUTADO_UI = new Set(['ejecutado', 'ejecutada', 'ejecutados', 'ejecutadas']);
+const FORMS_RECHAZADO_UI = new Set(['rechazado', 'rechazada', 'rechazados', 'rechazadas']);
+
+function estadoPhraseLooksNegatedUi(v) {
+  return /\b(no|sin)\s+(autorizad|ejecutad|rechazad)/.test(` ${v} `);
+}
+
+/** Claves alineadas con el backend para filtros, pestañas y colores por fila. */
+function canonicalEstadoKey(raw) {
+  let n = normalizeEstado(raw);
+  if (!n) return '';
+  n = n.replace(/^[\s"'«»[\]()]+|[\s"'«»[\]().]+$/g, '').replace(/\.+$/g, '').trim();
+  if (!n) return '';
+  if (isAtendidoParcialNorm(n)) {
+    return 'atendido parcialmente';
+  }
+  if (FORMS_AUTORIZADO_UI.has(n)) return 'autorizado';
+  if (FORMS_EJECUTADO_UI.has(n)) return 'ejecutado';
+  if (FORMS_RECHAZADO_UI.has(n)) return 'rechazado';
+
+  if (!estadoPhraseLooksNegatedUi(n)) {
+    if (/\bautorizad(o|a|os|as)\b/.test(n)) return 'autorizado';
+    if (/\bejecutad(o|a|os|as)\b/.test(n)) return 'ejecutado';
+    if (/\brechazad(o|a|os|as)\b/.test(n)) return 'rechazado';
+  }
+  return n;
 }
 
 function pad2(n) {
@@ -247,11 +387,41 @@ function enrichRowZona(row, getDistritoOverride) {
   const info = inferZonaFromDestino(row.destino, manual);
   return {
     row,
-    estadoNorm: normalizeEstado(row.estado),
+    estadoNorm: canonicalEstadoKey(row.estado),
     zoneKey: info.zoneKey,
     zoneLabel: info.zoneLabel,
     needsDistrito: info.needsManualDistrito
   };
+}
+
+function columnsForEstadoReadonlyView(sheet) {
+  const colByKey = new Map((sheet.columns || []).map((c) => [c.key, c]));
+  return VISTA_ESTADO_LECTURA_KEYS.map((key) => ({
+    key,
+    name: HEADER_LABELS[key] || colByKey.get(key)?.name || key
+  }));
+}
+
+/** Todas las filas del filtro actual (sin agrupar por zona ni vendedor). */
+function buildFlatEstadoReadonlyRows(rows, getDistritoOverride) {
+  const sorted = [...rows].sort((a, b) => {
+    const ta = parseFechaToTimestamp(a.fecha);
+    const tb = parseFechaToTimestamp(b.fecha);
+    if (tb !== ta) return tb - ta;
+    return normalizeVendedorKey(a.vendedor).localeCompare(normalizeVendedorKey(b.vendedor), 'es');
+  });
+  return sorted.map((row, rowIdx) => {
+    const e = enrichRowZona(row, getDistritoOverride);
+    const zebra = rowIdx % 2 === 0 ? '#f8fafc' : '#ffffff';
+    return {
+      kind: 'data',
+      row,
+      bg: zebra,
+      zoneKey: e.zoneKey,
+      zoneLabel: e.zoneLabel,
+      needsDistrito: false
+    };
+  });
 }
 
 /** Búsqueda en Google Maps: incluye distrito/provincia manual si no está ya en el texto del destino. */
@@ -268,19 +438,26 @@ function buildMapsSearchQuery(row, destinoRaw, getDistritoOverride) {
   return `${base}${suffix}`;
 }
 
-/** Filas de una sola zona: Autorizado → parcial → otros; vendedor y fecha desc. */
+/**
+ * Filas de una sola zona: primero lo habitual en operación (autorizado, parcial, demás),
+ * al final ejecutado y rechazado — coherente con el orden de las pestañas.
+ */
 function prepareGroupedRowsForZone(rows, getDistritoOverride, zoneKey) {
   const autorizado = [];
   const parcial = [];
-  const otros = [];
+  const resto = [];
+  const ejecutadoB = [];
+  const rechazadoB = [];
 
   for (const row of rows) {
     const e = enrichRowZona(row, getDistritoOverride);
     if (e.zoneKey !== zoneKey) continue;
     const n = e.estadoNorm;
-    if (n === 'autorizado') autorizado.push(e);
+    if (n === 'ejecutado') ejecutadoB.push(e);
+    else if (n === 'rechazado') rechazadoB.push(e);
+    else if (n === 'autorizado') autorizado.push(e);
     else if (n === 'atendido parcialmente') parcial.push(e);
-    else otros.push(e);
+    else resto.push(e);
   }
 
   const sortBucket = (bucket) => {
@@ -294,7 +471,9 @@ function prepareGroupedRowsForZone(rows, getDistritoOverride, zoneKey) {
 
   sortBucket(autorizado);
   sortBucket(parcial);
-  sortBucket(otros);
+  sortBucket(resto);
+  sortBucket(ejecutadoB);
+  sortBucket(rechazadoB);
 
   const pushBucket = (bucket) => {
     const out = [];
@@ -311,7 +490,13 @@ function prepareGroupedRowsForZone(rows, getDistritoOverride, zoneKey) {
     return out;
   };
 
-  return [...pushBucket(autorizado), ...pushBucket(parcial), ...pushBucket(otros)];
+  return [
+    ...pushBucket(autorizado),
+    ...pushBucket(parcial),
+    ...pushBucket(resto),
+    ...pushBucket(ejecutadoB),
+    ...pushBucket(rechazadoB)
+  ];
 }
 
 function countRowsByZone(rows, getDistritoOverride) {
@@ -328,12 +513,71 @@ function zonesWithData(counts) {
   return ZONE_SORT_ORDER.filter((z) => counts[z] > 0);
 }
 
+/** Filtro de estado en barra (solo ejecutado / rechazado; el resto se ve eligiendo zona). */
+const ESTADO_TAB = {
+  ALL: '__all__',
+  AUTORIZADO: 'autorizado',
+  PARCIAL: 'atendido parcialmente',
+  EJECUTADO: 'ejecutado',
+  RECHAZADO: 'rechazado',
+  SIN_ESTADO: '__sin_estado__'
+};
+
+const ESTADO_TAB_ORDER = [
+  ESTADO_TAB.ALL,
+  ESTADO_TAB.AUTORIZADO,
+  ESTADO_TAB.PARCIAL,
+  ESTADO_TAB.EJECUTADO,
+  ESTADO_TAB.RECHAZADO,
+  ESTADO_TAB.SIN_ESTADO
+];
+
+const ESTADO_TAB_LABEL = {
+  [ESTADO_TAB.ALL]: 'Todas las filas',
+  [ESTADO_TAB.AUTORIZADO]: 'Autorizado',
+  [ESTADO_TAB.PARCIAL]: 'Atendido parcialmente',
+  [ESTADO_TAB.EJECUTADO]: 'Ejecutado',
+  [ESTADO_TAB.RECHAZADO]: 'Rechazado',
+  [ESTADO_TAB.SIN_ESTADO]: 'Sin estado'
+};
+
+/** Tras zonas: quitar filtro de estado + Ejecutado + Rechazado (siempre hay salida si el filtro vacía todo). */
+const ESTADO_FILTROS_EN_BARRA = [ESTADO_TAB.ALL, ESTADO_TAB.EJECUTADO, ESTADO_TAB.RECHAZADO];
+
+const ESTADO_TAB_ACCENT = {
+  [ESTADO_TAB.ALL]: '#64748b',
+  [ESTADO_TAB.AUTORIZADO]: '#7c3aed',
+  [ESTADO_TAB.PARCIAL]: '#15803d',
+  [ESTADO_TAB.EJECUTADO]: '#0d9488',
+  [ESTADO_TAB.RECHAZADO]: '#e11d48',
+  [ESTADO_TAB.SIN_ESTADO]: '#94a3b8'
+};
+
+function rowMatchesEstadoTab(row, tabKey) {
+  if (tabKey === ESTADO_TAB.ALL) return true;
+  const n = canonicalEstadoKey(row.estado);
+  if (tabKey === ESTADO_TAB.SIN_ESTADO) return n === '';
+  return n === tabKey;
+}
+
+function filterRowsByEstadoTab(rows, tabKey) {
+  return rows.filter((row) => rowMatchesEstadoTab(row, tabKey));
+}
+
+function countRowsByEstadoGroups(rows) {
+  const out = {};
+  for (const k of ESTADO_TAB_ORDER) {
+    out[k] = k === ESTADO_TAB.ALL ? rows.length : filterRowsByEstadoTab(rows, k).length;
+  }
+  return out;
+}
+
 function formatDisplayCell(colKey, raw) {
   if (raw === '' || raw == null) return '';
   if (colKey === 'fecha') {
     return formatDisplayDate(raw);
   }
-  if (colKey === 'cantidad') {
+  if (colKey === 'cantidad' || colKey === 'atendido' || colKey === 'pendiente') {
     const n = Number(String(raw).replace(',', '.').replace(/\s/g, ''));
     if (!Number.isNaN(n)) {
       return Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100);
@@ -476,9 +720,13 @@ function LogisticsTable({
   distritoOverrides,
   setDistritoOverrides,
   allLogisticsRows,
-  stickyTableHead = true
+  stickyTableHead = true,
+  /** Hay datos en la hoja pero el filtro Ejecutado/Rechazado dejó 0 filas. */
+  emptyBecauseEstadoFilter = false,
+  onClearEstadoFilter,
+  /** Ejecutado/Rechazado: lista plana y columnas reducidas, sin mapas ni distrito. */
+  vistaLecturaSoloEstado = false
 }) {
-  const columns = sheet.columns;
   const [mapQuery, setMapQuery] = useState(null);
   const [hoveredRowIdx, setHoveredRowIdx] = useState(null);
   const [distritoFormKey, setDistritoFormKey] = useState(null);
@@ -490,16 +738,40 @@ function LogisticsTable({
     [distritoOverrides]
   );
 
-  const { displayRows, vendedorRowSpans } = useMemo(() => {
+  const { displayRows, vendedorRowSpans, displayColumns } = useMemo(() => {
+    if (vistaLecturaSoloEstado) {
+      const dc = columnsForEstadoReadonlyView(sheet);
+      if (!sheet.logisticsRows?.length) {
+        return { displayRows: [], vendedorRowSpans: [], displayColumns: dc };
+      }
+      const flat = buildFlatEstadoReadonlyRows(sheet.logisticsRows, getDistritoOverride);
+      return {
+        displayRows: flat,
+        vendedorRowSpans: flat.map(() => 1),
+        displayColumns: dc
+      };
+    }
     if (activeZone == null) {
-      return { displayRows: [], vendedorRowSpans: [] };
+      return {
+        displayRows: [],
+        vendedorRowSpans: [],
+        displayColumns: sheet.columns
+      };
     }
     const rows = prepareGroupedRowsForZone(sheet.logisticsRows, getDistritoOverride, activeZone);
     return {
       displayRows: rows,
-      vendedorRowSpans: computeVendedorRowSpans(rows)
+      vendedorRowSpans: computeVendedorRowSpans(rows),
+      displayColumns: sheet.columns
     };
-  }, [sheet.logisticsRows, getDistritoOverride, activeZone]);
+  }, [
+    vistaLecturaSoloEstado,
+    sheet,
+    sheet.logisticsRows,
+    sheet.columns,
+    getDistritoOverride,
+    activeZone
+  ]);
 
   return (
     <>
@@ -514,7 +786,7 @@ function LogisticsTable({
           }
         >
           <tr style={{ backgroundColor: HEADER_BG, color: '#fff' }}>
-            {columns.map((col) => (
+            {displayColumns.map((col) => (
               <th
                 key={col.key}
                 className="font-bold text-[11px] leading-tight uppercase tracking-wide px-2 py-2 align-middle select-none"
@@ -522,6 +794,7 @@ function LogisticsTable({
               >
                 <span className="inline-flex items-center justify-center gap-1">
                   {col.key === 'destino' &&
+                  !vistaLecturaSoloEstado &&
                   activeZone != null &&
                   activeZone !== ZONA_KEYS.SIN_CLASIFICAR ? (
                     <MapPin className="w-3 h-3 text-white/90 shrink-0" aria-hidden />
@@ -534,20 +807,41 @@ function LogisticsTable({
         </thead>
         <tbody>
           {sheet.logisticsRows.length === 0 ? (
-            <tr style={{ backgroundColor: ROW_BG_AUTORIZADO }}>
+            <tr style={{ backgroundColor: emptyBecauseEstadoFilter ? '#f0fdf4' : ROW_BG_AUTORIZADO }}>
               <td
-                colSpan={columns.length}
-                className="px-3 py-4 text-xs text-black text-center"
+                colSpan={displayColumns.length}
+                className="px-3 py-4 text-xs text-black text-center space-y-2"
                 style={{ border: 'none' }}
               >
-                No hay filas con estado Autorizado o Atendido parcialmente, o faltan columnas requeridas
-                en el Excel.
+                {emptyBecauseEstadoFilter ? (
+                  <div className="flex flex-col items-center gap-2">
+                    <p className="text-gray-800 max-w-md">
+                      Con el filtro <strong>Ejecutado</strong> o <strong>Rechazado</strong> activo no hay filas que
+                      coincidan en este archivo (o ese texto no se reconoció como estado). Pulse{' '}
+                      <strong>Todas las filas</strong> arriba o aquí para volver al listado normal.
+                    </p>
+                    {typeof onClearEstadoFilter === 'function' ? (
+                      <button
+                        type="button"
+                        className="px-3 py-1.5 text-xs font-semibold rounded-md bg-primary-600 text-white hover:bg-primary-700 shadow-sm"
+                        onClick={onClearEstadoFilter}
+                      >
+                        Ver todas las filas
+                      </button>
+                    ) : null}
+                  </div>
+                ) : (
+                  <span>
+                    No hay filas de datos válidas o el archivo no trae todas las columnas requeridas. Si acaba de
+                    subir el Excel con estados ejecutado/rechazado y ve (0), use &quot;Todas las filas&quot;.
+                  </span>
+                )}
               </td>
             </tr>
           ) : displayRows.length === 0 ? (
             <tr style={{ backgroundColor: '#f8fafc' }}>
               <td
-                colSpan={columns.length}
+                colSpan={displayColumns.length}
                 className="px-3 py-6 text-xs text-gray-600 text-center"
                 style={{ border: 'none' }}
               >
@@ -558,7 +852,8 @@ function LogisticsTable({
             displayRows.map((item, rowIdx) => {
               const { row, bg, needsDistrito, zoneKey } = item;
               const rk = logisticsRowKey(row);
-              const showGroupSep = shouldShowGroupSeparator(displayRows, rowIdx);
+              const showGroupSep =
+                !vistaLecturaSoloEstado && shouldShowGroupSeparator(displayRows, rowIdx);
               const sepCellStyle = showGroupSep
                 ? { borderTop: `2px solid ${VENDEDOR_GROUP_BORDER}` }
                 : {};
@@ -570,7 +865,21 @@ function LogisticsTable({
                   onMouseEnter={() => setHoveredRowIdx(rowIdx)}
                   onMouseLeave={() => setHoveredRowIdx(null)}
                 >
-                  {columns.map((col) => {
+                  {vistaLecturaSoloEstado
+                    ? displayColumns.map((col) => {
+                        const v = row[col.key];
+                        return (
+                          <td
+                            key={col.key}
+                            className="px-2 py-1.5 text-[11px] text-black leading-snug align-middle break-words text-center"
+                            style={{ border: 'none', ...sepCellStyle }}
+                            title={row[col.key] != null ? String(row[col.key]) : ''}
+                          >
+                            {v === '' || v == null ? '' : formatDisplayCell(col.key, v)}
+                          </td>
+                        );
+                      })
+                    : displayColumns.map((col) => {
                     const v = row[col.key];
                     const isDestino = col.key === 'destino';
                     const isVendedor = col.key === 'vendedor';
@@ -712,16 +1021,40 @@ function LogisticsSheetWithZoneTabs({
   allLogisticsRows
 }) {
   const [activeZone, setActiveZone] = useState(null);
+  const [activeEstadoTab, setActiveEstadoTab] = useState(ESTADO_TAB.ALL);
 
   const getDistritoOverride = useMemo(
     () => (row) => resolveDistritoManual(row, distritoOverrides),
     [distritoOverrides]
   );
 
-  const counts = useMemo(
-    () => countRowsByZone(sheet.logisticsRows, getDistritoOverride),
-    [sheet.logisticsRows, getDistritoOverride]
+  const grupoEstadoCounts = useMemo(() => countRowsByEstadoGroups(sheet.logisticsRows), [
+    sheet.logisticsRows
+  ]);
+
+  const filtrosBarraIds = useMemo(() => new Set([ESTADO_TAB.ALL, ...ESTADO_FILTROS_EN_BARRA]), []);
+
+  const displayEstadoTab = useMemo(() => {
+    if (!filtrosBarraIds.has(activeEstadoTab)) {
+      return ESTADO_TAB.ALL;
+    }
+    return activeEstadoTab;
+  }, [filtrosBarraIds, activeEstadoTab]);
+
+  const rowsPorEstado = useMemo(
+    () => filterRowsByEstadoTab(sheet.logisticsRows, displayEstadoTab),
+    [sheet.logisticsRows, displayEstadoTab]
   );
+
+  const sheetFiltrado = useMemo(() => ({ ...sheet, logisticsRows: rowsPorEstado }), [
+    sheet,
+    rowsPorEstado
+  ]);
+
+  const counts = useMemo(() => countRowsByZone(rowsPorEstado, getDistritoOverride), [
+    rowsPorEstado,
+    getDistritoOverride
+  ]);
 
   const zoneTabs = useMemo(() => zonesWithData(counts), [counts]);
 
@@ -730,6 +1063,9 @@ function LogisticsSheetWithZoneTabs({
     if (activeZone != null && zoneTabs.includes(activeZone)) return activeZone;
     return zoneTabs[0];
   }, [zoneTabs, activeZone]);
+
+  const vistaLecturaSoloEstado =
+    displayEstadoTab === ESTADO_TAB.EJECUTADO || displayEstadoTab === ESTADO_TAB.RECHAZADO;
 
   if (sheet.logisticsRows.length === 0) {
     return (
@@ -751,12 +1087,20 @@ function LogisticsSheetWithZoneTabs({
       */}
       <div className="sticky top-16 z-[28] -mx-6 px-6 py-3 mb-3 bg-gray-50/98 backdrop-blur-md border-b border-gray-200 shadow-md space-y-2.5">
         <p className="text-[11px] text-gray-600 leading-snug">
-          Zonas según direcciones del archivo. Los distritos que indiques manualmente se{' '}
-          <strong>guardan en este navegador</strong>: al cargar un archivo nuevo, el mismo destino
-          recupera su distrito y va a su zona si ya lo habías definido; si el texto del archivo ya trae
-          distrito detectable, se clasifica automático sin usar esa memoria.
+          Orden: <strong>Zonas Lima/Callao</strong> según distrito, luego <strong>Provincia</strong> y{' '}
+          <strong>Sin clasificar</strong> para indicar distrito con la chincheta y clasificar. Al final de la
+          barra: <strong>Ejecutado</strong> y <strong>Rechazado</strong> (filtro por estado). Dentro de cada
+          zona se listan los pedidos habituales junto con autorizado y atendido parcial; no hace falta un botón
+          Autorizado si ya está clasificado por distrito. En <strong>Ejecutado</strong> y{' '}
+          <strong>Rechazado</strong> solo verá una tabla de lectura (fecha, vendedor, cliente, cantidades,
+          destino, estado). Use <strong>Todas las filas</strong> para quitar el filtro cuando no haya datos en
+          esas vistas. Los distritos manuales se guardan en este navegador entre archivos.
         </p>
-        <div className="flex flex-wrap items-center gap-2">
+        <div
+          className="flex flex-wrap items-center gap-x-2 gap-y-2 pt-2"
+          role="tablist"
+          aria-label="Zona y estado"
+        >
           {zoneTabs.map((z) => {
             const accent = ZONE_ACCENT[z] ?? '#64748b';
             const active = displayZone === z;
@@ -764,7 +1108,12 @@ function LogisticsSheetWithZoneTabs({
               <button
                 key={z}
                 type="button"
-                onClick={() => setActiveZone(z)}
+                role="tab"
+                aria-selected={active}
+                onClick={() => {
+                  setActiveZone(z);
+                  setActiveEstadoTab(ESTADO_TAB.ALL);
+                }}
                 className={`px-2.5 py-1.5 text-[11px] rounded border transition-colors ${
                   active
                     ? 'bg-white font-semibold text-gray-900 shadow-sm ring-1 ring-gray-200'
@@ -782,8 +1131,44 @@ function LogisticsSheetWithZoneTabs({
               </button>
             );
           })}
+          {zoneTabs.length > 0 && ESTADO_FILTROS_EN_BARRA.length > 0 ? (
+            <span
+              className="hidden sm:inline-block w-px h-6 bg-gray-300 shrink-0 mx-0.5 self-center"
+              aria-hidden
+            />
+          ) : null}
+          {ESTADO_FILTROS_EN_BARRA.map((ek) => {
+            const accent = ESTADO_TAB_ACCENT[ek] ?? '#64748b';
+            const active = displayEstadoTab === ek;
+            const n = grupoEstadoCounts[ek] ?? 0;
+            return (
+              <button
+                key={ek}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setActiveEstadoTab(ek)}
+                className={`px-2.5 py-1.5 text-[11px] rounded border transition-colors ${
+                  active
+                    ? 'bg-white font-semibold text-gray-900 shadow-sm ring-1 ring-gray-200'
+                    : 'bg-white/80 text-gray-700 hover:bg-white border-gray-300'
+                }`}
+                style={{
+                  borderLeftWidth: '3px',
+                  borderLeftColor: active ? accent : '#e5e7eb'
+                }}
+              >
+                {ESTADO_TAB_LABEL[ek] ?? ek}
+                <span className={`ml-1 tabular-nums ${active ? 'text-primary-700' : 'text-gray-500'}`}>
+                  ({n.toLocaleString()})
+                </span>
+              </button>
+            );
+          })}
         </div>
-        {displayZone === ZONA_KEYS.SIN_CLASIFICAR && counts[ZONA_KEYS.SIN_CLASIFICAR] > 0 ? (
+        {!vistaLecturaSoloEstado &&
+        displayZone === ZONA_KEYS.SIN_CLASIFICAR &&
+        counts[ZONA_KEYS.SIN_CLASIFICAR] > 0 ? (
           <div className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 leading-snug">
             Use el ícono de chincheta en <strong>Destino</strong> para escribir el distrito. Si lo reconocemos,
             el registro saldrá de aquí y se mostrará en la pestaña de la zona correspondiente. Mismo texto de
@@ -793,12 +1178,19 @@ function LogisticsSheetWithZoneTabs({
       </div>
 
       <LogisticsTable
-        sheet={sheet}
+        sheet={sheetFiltrado}
         activeZone={displayZone}
         distritoOverrides={distritoOverrides}
         setDistritoOverrides={setDistritoOverrides}
         allLogisticsRows={allLogisticsRows}
         stickyTableHead={false}
+        vistaLecturaSoloEstado={vistaLecturaSoloEstado}
+        emptyBecauseEstadoFilter={
+          sheet.logisticsRows.length > 0 &&
+          rowsPorEstado.length === 0 &&
+          displayEstadoTab !== ESTADO_TAB.ALL
+        }
+        onClearEstadoFilter={() => setActiveEstadoTab(ESTADO_TAB.ALL)}
       />
     </div>
   );
@@ -807,6 +1199,7 @@ function LogisticsSheetWithZoneTabs({
 function AnalysisResults({ data }) {
   const summary = data.analysis.summary;
   const sheets = data.analysis.sheets;
+  const sheetsForTable = useMemo(() => sheets.map(normalizePedidoLogisticsSheet), [sheets]);
   const hasMissing = useMemo(
     () => sheets.some((s) => s.missingColumns?.length > 0),
     [sheets]
@@ -824,8 +1217,8 @@ function AnalysisResults({ data }) {
   }, [distritoOverrides]);
 
   const allLogisticsRows = useMemo(
-    () => sheets.flatMap((s) => s.logisticsRows || []),
-    [sheets]
+    () => sheetsForTable.flatMap((s) => s.logisticsRows || []),
+    [sheetsForTable]
   );
 
   /** Cada nuevo resultado del servidor (incluso mismo nombre de archivo): releer memoria en disco. */
@@ -867,9 +1260,9 @@ function AnalysisResults({ data }) {
       </div>
 
       <div className="space-y-10">
-        {sheets.map((sheet, sheetIndex) => (
+        {sheetsForTable.map((sheet, sheetIndex) => (
           <section key={sheetIndex} className="w-full">
-            {sheets.length > 1 && (
+            {sheetsForTable.length > 1 && (
               <h3 className="text-sm font-semibold text-gray-700 mb-2 uppercase tracking-wide">
                 {sheet.name}
                 <span className="font-normal text-gray-500 normal-case ml-2">

@@ -1,4 +1,4 @@
-import { Upload, Store, ChevronLeft, ChevronRight, Database } from 'lucide-react';
+import { Upload, Store, ChevronLeft, Database } from 'lucide-react';
 
 function Sidebar({ isOpen, activeView, onViewChange, onToggle }) {
   const menuItems = [
@@ -36,32 +36,41 @@ function Sidebar({ isOpen, activeView, onViewChange, onToggle }) {
         shadow-lg lg:shadow-none
       `}
       >
-        <div className="h-16 flex items-center justify-between px-4 border-b border-gray-200">
+        <div
+          className={`
+          border-b border-gray-200 gap-2 min-w-0 px-2 sm:px-4
+          ${isOpen ? 'h-16 flex items-center justify-between' : 'flex flex-col items-center justify-center gap-2 py-3 lg:py-4 min-h-[4rem]'}
+        `}
+        >
           {isOpen && (
-            <div className="flex items-center gap-3">
-              <div className="p-2 bg-primary-600 rounded-lg">
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="p-2 bg-primary-600 rounded-lg shrink-0" aria-hidden>
                 <Database className="w-6 h-6 text-white" />
               </div>
-              <div>
-                <h1 className="text-lg font-bold text-gray-800">Logística ERP</h1>
-                <p className="text-xs text-gray-500">Sistema Profesional</p>
+              <div className="min-w-0">
+                <h1 className="text-lg font-bold text-gray-800 truncate">Logística ERP</h1>
+                <p className="text-xs text-gray-500 truncate">Sistema Profesional</p>
               </div>
             </div>
           )}
           {!isOpen && (
-            <div className="p-2 bg-primary-600 rounded-lg mx-auto">
+            <button
+              type="button"
+              onClick={onToggle}
+              className="p-2 bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 shrink-0"
+              aria-label="Desplegar menú y ver Estado por pedido y Makro Tiendas"
+              title="Ver análisis: Estado por pedido y Makro Tiendas"
+            >
               <Database className="w-6 h-6 text-white" />
-            </div>
+            </button>
           )}
           <button
+            type="button"
             onClick={onToggle}
-            className="p-2 hover:bg-gray-100 rounded-lg transition-colors hidden lg:flex"
+            className={`p-2 hover:bg-gray-100 rounded-lg transition-colors shrink-0 hidden lg:flex ${!isOpen ? 'lg:!hidden' : ''}`}
+            aria-label="Contraer menú lateral"
           >
-            {isOpen ? (
-              <ChevronLeft className="w-5 h-5 text-gray-600" />
-            ) : (
-              <ChevronRight className="w-5 h-5 text-gray-600" />
-            )}
+            <ChevronLeft className="w-5 h-5 text-gray-600" />
           </button>
         </div>
 

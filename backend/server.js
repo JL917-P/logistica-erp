@@ -124,8 +124,45 @@ function validateSpreadsheetBuffer(buffer) {
   return 'csv';
 }
 
-/** Columnas de logística a extraer (el encabezado en Excel debe coincidir al normalizar). */
-const LOGISTICS_KEYS = ['centro', 'fecha', 'vendedor', 'cliente', 'producto', 'cantidad', 'destino', 'estado'];
+/**
+ * Columnas de salida logística (orden de tabla).
+ * pendiente = max(cantidad - atendido, 0)
+ */
+const LOGISTICS_KEYS = [
+  'centro',
+  'fecha',
+  'vendedor',
+  'cliente',
+  'producto',
+  'cantidad',
+  'atendido',
+  'pendiente',
+  'destino',
+  'estado'
+];
+/** Columnas que sí vienen del Excel (pendiente se calcula). */
+const LOGISTICS_SOURCE_KEYS = [
+  'centro',
+  'fecha',
+  'vendedor',
+  'cliente',
+  'producto',
+  'cantidad',
+  'atendido',
+  'destino',
+  'estado'
+];
+/** Requeridas para considerar la hoja como estructura válida. */
+const LOGISTICS_REQUIRED_KEYS = [
+  'centro',
+  'fecha',
+  'vendedor',
+  'cliente',
+  'producto',
+  'cantidad',
+  'destino',
+  'estado'
+];
 
 const LOGISTICS_LABELS = {
   centro: 'Centro',
@@ -134,12 +171,22 @@ const LOGISTICS_LABELS = {
   cliente: 'Cliente',
   producto: 'Producto',
   cantidad: 'Cantidad',
+  atendido: 'Atendido',
+  pendiente: 'Pendiente',
   destino: 'Destino',
   estado: 'Estado'
 };
 
-/** Estados que se muestran (comparación insensible a mayúsculas y espacios). */
-const ALLOWED_ESTADOS = new Set(['autorizado', 'atendido parcialmente']);
+/**
+ * Estados incluidos en el análisis (comparación insensible a mayúsculas y espacios).
+ * Exports típicos traen también EJECUTADO / RECHAZADO; omitirlos ocultaba la mayor parte de las filas.
+ */
+const ALLOWED_ESTADOS = new Set([
+  'autorizado',
+  'atendido parcialmente',
+  'ejecutado',
+  'rechazado'
+]);
 
 function normalizeHeader(value) {
   if (value == null || value === '') return '';
@@ -153,9 +200,21 @@ function normalizeHeader(value) {
     .replace(/\s+/g, ' ');
 }
 
-function normalizeEstadoValue(value) {
+/** Limpia la celda antes de comparar (Excel mete NBSP, zero‑width, BOM, etc.). */
+function sanitizeEstadoCellRaw(value) {
   if (value == null || value === '') return '';
-  return String(value)
+  let s = String(value)
+    .replace(/^\ufeff/g, '')
+    .replace(/[\u200B-\u200D\uFEFF\u2060]/g, '')
+    .replace(/\u00a0/g, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+
+function normalizeEstadoValue(value) {
+  const s = sanitizeEstadoCellRaw(value);
+  if (!s) return '';
+  return s
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -163,18 +222,224 @@ function normalizeEstadoValue(value) {
     .replace(/\s+/g, ' ');
 }
 
+const FORMS_AUTORIZADO = new Set(['autorizado', 'autorizada', 'autorizados', 'autorizadas']);
+const FORMS_EJECUTADO = new Set(['ejecutado', 'ejecutada', 'ejecutados', 'ejecutadas']);
+const FORMS_RECHAZADO = new Set(['rechazado', 'rechazada', 'rechazados', 'rechazadas']);
+
+/** Palabras tipo «NO EJECUTADO» — no forzar a ejecutado por coincidencia parcial. */
+function estadoPhraseLooksNegated(v) {
+  return /\b(no|sin)\s+(autorizad|ejecutad|rechazad)/.test(` ${v} `);
+}
+
+/** Misma lógica que el front: variantes del Excel → clave permitida. */
+function canonicalEstadoKey(value) {
+  let v = normalizeEstadoValue(value);
+  if (!v) return '';
+  v = v.replace(/^[\s"'«»[\]()]+|[\s"'«»[\]().]+$/g, '').replace(/\.+$/g, '').trim();
+  if (!v) return '';
+
+  if (isAtendidoParcialNormalized(v)) {
+    return 'atendido parcialmente';
+  }
+  if (FORMS_AUTORIZADO.has(v)) return 'autorizado';
+  if (FORMS_EJECUTADO.has(v)) return 'ejecutado';
+  if (FORMS_RECHAZADO.has(v)) return 'rechazado';
+
+  if (!estadoPhraseLooksNegated(v)) {
+    if (/\bautorizad(o|a|os|as)\b/.test(v)) return 'autorizado';
+    if (/\bejecutad(o|a|os|as)\b/.test(v)) return 'ejecutado';
+    if (/\brechazad(o|a|os|as)\b/.test(v)) return 'rechazado';
+  }
+  return v;
+}
+
 function isAllowedEstado(value) {
-  return ALLOWED_ESTADOS.has(normalizeEstadoValue(value));
+  const v = canonicalEstadoKey(value);
+  if (v === '') {
+    return true;
+  }
+  return ALLOWED_ESTADOS.has(v);
+}
+
+function parseLogisticsNumber(value) {
+  if (value == null || value === '') return 0;
+  const n = Number(String(value).replace(/\s/g, '').replace(',', '.'));
+  return Number.isNaN(n) ? 0 : n;
+}
+
+/** Encabezados Excel equivalentes a "atendido" (normalizados con normalizeHeader). */
+function acceptedHeaderVariantsForKey(key) {
+  if (key === 'atendido') {
+    const raw = [
+      'atendido',
+      'atendidos',
+      'atendida',
+      'atendidas',
+      'atentido',
+      'cantidad atendida',
+      'cant atendida',
+      'cantidad atendid',
+      'cant atendid',
+      'cantidad_atendida',
+      'cant_atendida',
+      'unidades atendidas',
+      'unidad atendida',
+      'qty atendida',
+      'qty atendido',
+      'und atendidas',
+      'und atendida',
+      'unds atendidas',
+      'unds atendido',
+      'cant entregada',
+      'cantidad entregada',
+      'entregado',
+      'entregados',
+      'entregadas',
+      'unidades entregadas',
+      'despachado',
+      'despachados',
+      'cant despachada',
+      'unidades despachadas',
+      'surtido',
+      'surtidos',
+      'cant surtida',
+      'recibido',
+      'aprobado parcial',
+      'atend parcial'
+    ];
+    return [...new Set(raw.map((s) => normalizeHeader(s)))];
+  }
+  if (key === 'estado') {
+    const raw = [
+      'estado',
+      'estados',
+      'estado pedido',
+      'estado del pedido',
+      'est pedido',
+      'est ped',
+      'estado oc',
+      'est oc',
+      'situacion',
+      'situación',
+      'status',
+      'estatus',
+      'condicion',
+      'condición',
+      'etapa'
+    ];
+    return [...new Set(raw.map((s) => normalizeHeader(s)))];
+  }
+  return [normalizeHeader(key)];
+}
+
+/**
+ * Celda Estado: mismo criterio que el front para parcial / plurales / orden de palabras.
+ */
+function isAtendidoParcialNormalized(n) {
+  if (!n) return false;
+  const partial = n.includes('parcialmente') || /\bparcial\b/.test(n);
+  if (!partial) return false;
+  return /\batendid(o|os|a|as)\b/.test(n);
+}
+
+/**
+ * Columna Estado sin nombre exacto: situación/status y similares.
+ */
+function guessEstadoColumn(headers, mapping) {
+  const usedIndices = new Set();
+  for (const k of LOGISTICS_SOURCE_KEYS) {
+    const m = mapping[k];
+    if (m != null) usedIndices.add(m.index);
+  }
+  let best = null;
+  let bestScore = 0;
+  for (let i = 0; i < headers.length; i++) {
+    if (usedIndices.has(i)) continue;
+    const h = normalizeHeader(headers[i]);
+    if (!h || h.length < 3) continue;
+    let score = 0;
+    if (/\bestados?\b/.test(h)) score += 22;
+    if (/\bsituacion\b/.test(` ${h} `)) score += 18;
+    if (h.includes('status') || h.includes('estatus')) score += 18;
+    if (h.includes('condicion')) score += 12;
+    if (h.includes('etapa')) score += 10;
+    if (score > bestScore) {
+      bestScore = score;
+      best = {
+        index: i,
+        label: headers[i] != null ? String(headers[i]) : LOGISTICS_LABELS.estado
+      };
+    }
+  }
+  return bestScore >= 10 ? best : null;
+}
+
+/**
+ * Si no hubo coincidencia exacta con alias, intenta detectar la columna por palabras clave
+ * (evitando índices ya usados por cantidad, destino, etc.).
+ */
+function guessAtendidoColumn(headers, mapping) {
+  const usedIndices = new Set();
+  for (const key of LOGISTICS_SOURCE_KEYS) {
+    const m = mapping[key];
+    if (m != null) usedIndices.add(m.index);
+  }
+  let best = null;
+  let bestScore = 0;
+  for (let i = 0; i < headers.length; i++) {
+    if (usedIndices.has(i)) continue;
+    const h = normalizeHeader(headers[i]);
+    if (!h || h.length < 2) continue;
+
+    let score = 0;
+    if (/\b(atendidos?|atendidas?)\b/.test(h)) score += 14;
+    if (h.includes('cant') && (h.includes('atend') || h.includes('entreg'))) score += 12;
+    if (h.includes('unid') && (h.includes('atend') || h.includes('entreg') || h.includes('despach')))
+      score += 10;
+    if (h.includes('und') && (h.includes('atend') || h.includes('entreg') || h.includes('despach')))
+      score += 10;
+    if (h.includes('entreg')) score += 10;
+    if (h.includes('despach')) score += 10;
+    if (h.includes('surtid')) score += 9;
+    if (h.includes('atencion')) score -= 15;
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = {
+        index: i,
+        label: headers[i] != null ? String(headers[i]) : LOGISTICS_LABELS.atendido
+      };
+    }
+  }
+  return bestScore >= 8 ? best : null;
+}
+
+/**
+ * Columna Estado: primero coincidencia exacta "ESTADO"/"ESTADOS"; si no, otros alias.
+ * Si no, `STATUS` u otra etiqueta genérica delante en la fila podía mapearse antes y vaciar el estado real.
+ */
+function findEstadoColumnIndex(headers) {
+  const nh = headers.map((h) => normalizeHeader(h));
+  const exactIdx = nh.findIndex((h) => h === 'estado' || h === 'estados');
+  if (exactIdx !== -1) {
+    return exactIdx;
+  }
+  const accepted = acceptedHeaderVariantsForKey('estado');
+  return headers.findIndex((h) => accepted.includes(normalizeHeader(h)));
 }
 
 function mapLogisticsColumns(headers) {
   const mapping = {};
   const missing = [];
-  for (const key of LOGISTICS_KEYS) {
-    const idx = headers.findIndex((h) => normalizeHeader(h) === key);
+  for (const key of LOGISTICS_SOURCE_KEYS) {
+    const accepted = acceptedHeaderVariantsForKey(key);
+    const idx =
+      key === 'estado' ? findEstadoColumnIndex(headers) : headers.findIndex((h) => accepted.includes(normalizeHeader(h)));
     if (idx === -1) {
-      missing.push(key);
       mapping[key] = null;
+      if (LOGISTICS_REQUIRED_KEYS.includes(key)) {
+        missing.push(key);
+      }
     } else {
       mapping[key] = {
         index: idx,
@@ -182,17 +447,41 @@ function mapLogisticsColumns(headers) {
       };
     }
   }
+  if (!mapping.atendido) {
+    const guessed = guessAtendidoColumn(headers, mapping);
+    if (guessed) {
+      mapping.atendido = guessed;
+    }
+  }
+  if (!mapping.estado) {
+    const guessedEst = guessEstadoColumn(headers, mapping);
+    if (guessedEst) {
+      mapping.estado = guessedEst;
+    }
+  }
   return { mapping, missing };
 }
 
 function rowToLogisticsObject(row, mapping) {
   const obj = {};
-  for (const key of LOGISTICS_KEYS) {
+  for (const key of LOGISTICS_SOURCE_KEYS) {
     const m = mapping[key];
-    obj[key] = m != null && row[m.index] !== undefined && row[m.index] !== null
-      ? row[m.index]
-      : '';
+    let cell =
+      m != null && row[m.index] !== undefined && row[m.index] !== null ? row[m.index] : '';
+    if (key === 'estado' && cell !== '') {
+      cell = sanitizeEstadoCellRaw(cell);
+    }
+    obj[key] = cell;
   }
+  const cantidadNum = parseLogisticsNumber(obj.cantidad);
+  const tieneCeldaAtendido =
+    mapping.atendido != null &&
+    row[mapping.atendido.index] !== undefined &&
+    row[mapping.atendido.index] !== null &&
+    String(row[mapping.atendido.index]).trim() !== '';
+  const atendidoNum = tieneCeldaAtendido ? parseLogisticsNumber(row[mapping.atendido.index]) : 0;
+  obj.atendido = atendidoNum;
+  obj.pendiente = Math.max(cantidadNum - atendidoNum, 0);
   return obj;
 }
 
@@ -799,7 +1088,13 @@ function analyzeExcel(buffer) {
         totalRowsSource: 0,
         totalRowsFiltered: 0,
         totalColumns: LOGISTICS_KEYS.length,
-        estadoFilterLabels: ['Autorizado', 'Atendido parcialmente']
+        estadoFilterLabels: [
+          'Autorizado',
+          'Atendido parcialmente',
+          'Ejecutado',
+          'Rechazado',
+          'Sin estado (celda vacía)'
+        ]
       }
     };
 
