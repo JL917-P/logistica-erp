@@ -424,6 +424,27 @@ function buildFlatEstadoReadonlyRows(rows, getDistritoOverride) {
   });
 }
 
+/** Atendido parcialmente: vista plana, pero manteniendo edición de distrito en destino. */
+function buildFlatEstadoEditableRows(rows, getDistritoOverride) {
+  const sorted = [...rows].sort((a, b) => {
+    const ta = parseFechaToTimestamp(a.fecha);
+    const tb = parseFechaToTimestamp(b.fecha);
+    if (tb !== ta) return tb - ta;
+    return normalizeVendedorKey(a.vendedor).localeCompare(normalizeVendedorKey(b.vendedor), 'es');
+  });
+  return sorted.map((row) => {
+    const e = enrichRowZona(row, getDistritoOverride);
+    return {
+      kind: 'data',
+      row,
+      bg: bgForEstadoZona(e.estadoNorm, e.zoneKey),
+      zoneKey: e.zoneKey,
+      zoneLabel: e.zoneLabel,
+      needsDistrito: e.needsDistrito
+    };
+  });
+}
+
 /** Búsqueda en Google Maps: incluye distrito/provincia manual si no está ya en el texto del destino. */
 function buildMapsSearchQuery(row, destinoRaw, getDistritoOverride) {
   const base = String(destinoRaw || '').trim();
@@ -507,8 +528,12 @@ const ESTADO_TAB_LABEL = {
   [ESTADO_TAB.SIN_ESTADO]: 'Sin estado'
 };
 
-/** Tras zonas: solo Ejecutado y Rechazado (no dependen del distrito). */
-const ESTADO_FILTROS_EN_BARRA = [ESTADO_TAB.EJECUTADO, ESTADO_TAB.RECHAZADO];
+/** Tras zonas: estados independientes por pestaña (no mueven filas por distrito). */
+const ESTADO_FILTROS_EN_BARRA = [
+  ESTADO_TAB.PARCIAL,
+  ESTADO_TAB.EJECUTADO,
+  ESTADO_TAB.RECHAZADO
+];
 
 const ESTADO_TAB_ACCENT = {
   [ESTADO_TAB.ALL]: '#64748b',
@@ -691,7 +716,9 @@ function LogisticsTable({
   emptyBecauseEstadoFilter = false,
   onClearEstadoFilter,
   /** Ejecutado/Rechazado: lista plana y columnas reducidas, sin mapas ni distrito. */
-  vistaLecturaSoloEstado = false
+  vistaLecturaSoloEstado = false,
+  /** Atendido parcialmente: lista plana con edición de distrito en destino. */
+  vistaAtendidoParcial = false
 }) {
   const [mapQuery, setMapQuery] = useState(null);
   const [hoveredRowIdx, setHoveredRowIdx] = useState(null);
@@ -717,6 +744,14 @@ function LogisticsTable({
         displayColumns: dc
       };
     }
+    if (vistaAtendidoParcial) {
+      const flat = buildFlatEstadoEditableRows(sheet.logisticsRows || [], getDistritoOverride);
+      return {
+        displayRows: flat,
+        vendedorRowSpans: flat.map(() => 1),
+        displayColumns: sheet.columns
+      };
+    }
     if (activeZone == null) {
       return {
         displayRows: [],
@@ -732,6 +767,7 @@ function LogisticsTable({
     };
   }, [
     vistaLecturaSoloEstado,
+    vistaAtendidoParcial,
     sheet,
     sheet.logisticsRows,
     sheet.columns,
@@ -997,7 +1033,11 @@ function LogisticsSheetWithZoneTabs({
   ]);
 
   const displayEstadoTab = useMemo(() => {
-    if (activeEstadoTab === ESTADO_TAB.EJECUTADO || activeEstadoTab === ESTADO_TAB.RECHAZADO) {
+    if (
+      activeEstadoTab === ESTADO_TAB.PARCIAL ||
+      activeEstadoTab === ESTADO_TAB.EJECUTADO ||
+      activeEstadoTab === ESTADO_TAB.RECHAZADO
+    ) {
       return activeEstadoTab;
     }
     return ESTADO_TAB.ALL;
@@ -1011,7 +1051,11 @@ function LogisticsSheetWithZoneTabs({
 
   /** En pestañas Ejecutado/Rechazado mostramos únicamente ese estado, sin distrito. */
   const rowsEstadoEspecial = useMemo(() => {
-    if (displayEstadoTab === ESTADO_TAB.EJECUTADO || displayEstadoTab === ESTADO_TAB.RECHAZADO) {
+    if (
+      displayEstadoTab === ESTADO_TAB.PARCIAL ||
+      displayEstadoTab === ESTADO_TAB.EJECUTADO ||
+      displayEstadoTab === ESTADO_TAB.RECHAZADO
+    ) {
       return filterRowsByEstadoTab(sheet.logisticsRows, displayEstadoTab);
     }
     return rowsAutorizados;
@@ -1037,6 +1081,7 @@ function LogisticsSheetWithZoneTabs({
 
   const vistaLecturaSoloEstado =
     displayEstadoTab === ESTADO_TAB.EJECUTADO || displayEstadoTab === ESTADO_TAB.RECHAZADO;
+  const vistaAtendidoParcial = displayEstadoTab === ESTADO_TAB.PARCIAL;
 
   if (sheet.logisticsRows.length === 0) {
     return (
@@ -1061,9 +1106,10 @@ function LogisticsSheetWithZoneTabs({
           En pestañas de <strong>distrito/zona</strong> (incluyendo <strong>Sin clasificar</strong>) solo se
           muestran pedidos con estado <strong>Autorizado</strong>. Si una dirección no tiene distrito, puede
           colocarlo con la chincheta para que pase a su zona correspondiente. Las pestañas{' '}
-          <strong>Ejecutado</strong> y <strong>Rechazado</strong> ignoran distrito/provincia/callao y muestran
-          solo sus registros en tabla de lectura (fecha, vendedor, cliente, producto, cantidad, atendido,
-          pendiente, destino, estado).
+          <strong>Atendido parcialmente</strong>, <strong>Ejecutado</strong> y <strong>Rechazado</strong>{' '}
+          ignoran distrito/provincia/callao para el listado. En <strong>Atendido parcialmente</strong> puede
+          editar distrito en destino para guardar memoria de direcciones; el registro se mantiene en esa pestaña
+          por su estado.
         </p>
         <div
           className="flex flex-wrap items-center gap-x-2 gap-y-2 pt-2"
@@ -1154,6 +1200,7 @@ function LogisticsSheetWithZoneTabs({
         allLogisticsRows={allLogisticsRows}
         stickyTableHead={false}
         vistaLecturaSoloEstado={vistaLecturaSoloEstado}
+        vistaAtendidoParcial={vistaAtendidoParcial}
         emptyBecauseEstadoFilter={
           sheet.logisticsRows.length > 0 &&
           rowsEstadoEspecial.length === 0 &&
