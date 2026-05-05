@@ -438,65 +438,31 @@ function buildMapsSearchQuery(row, destinoRaw, getDistritoOverride) {
   return `${base}${suffix}`;
 }
 
-/**
- * Filas de una sola zona: primero lo habitual en operación (autorizado, parcial, demás),
- * al final ejecutado y rechazado — coherente con el orden de las pestañas.
- */
+/** En zonas solo se renderiza estado AUTORIZADO (incluye Sin clasificar). */
 function prepareGroupedRowsForZone(rows, getDistritoOverride, zoneKey) {
   const autorizado = [];
-  const parcial = [];
-  const resto = [];
-  const ejecutadoB = [];
-  const rechazadoB = [];
-
   for (const row of rows) {
     const e = enrichRowZona(row, getDistritoOverride);
     if (e.zoneKey !== zoneKey) continue;
-    const n = e.estadoNorm;
-    if (n === 'ejecutado') ejecutadoB.push(e);
-    else if (n === 'rechazado') rechazadoB.push(e);
-    else if (n === 'autorizado') autorizado.push(e);
-    else if (n === 'atendido parcialmente') parcial.push(e);
-    else resto.push(e);
+    if (e.estadoNorm !== ESTADO_TAB.AUTORIZADO) continue;
+    autorizado.push(e);
   }
 
-  const sortBucket = (bucket) => {
-    bucket.sort((a, b) => {
-      const va = normalizeVendedorKey(a.row.vendedor);
-      const vb = normalizeVendedorKey(b.row.vendedor);
-      if (va !== vb) return va.localeCompare(vb, 'es');
-      return parseFechaToTimestamp(b.row.fecha) - parseFechaToTimestamp(a.row.fecha);
-    });
-  };
+  autorizado.sort((a, b) => {
+    const va = normalizeVendedorKey(a.row.vendedor);
+    const vb = normalizeVendedorKey(b.row.vendedor);
+    if (va !== vb) return va.localeCompare(vb, 'es');
+    return parseFechaToTimestamp(b.row.fecha) - parseFechaToTimestamp(a.row.fecha);
+  });
 
-  sortBucket(autorizado);
-  sortBucket(parcial);
-  sortBucket(resto);
-  sortBucket(ejecutadoB);
-  sortBucket(rechazadoB);
-
-  const pushBucket = (bucket) => {
-    const out = [];
-    for (const item of bucket) {
-      out.push({
-        kind: 'data',
-        row: item.row,
-        bg: bgForEstadoZona(item.estadoNorm, item.zoneKey),
-        zoneKey: item.zoneKey,
-        zoneLabel: item.zoneLabel,
-        needsDistrito: item.needsDistrito
-      });
-    }
-    return out;
-  };
-
-  return [
-    ...pushBucket(autorizado),
-    ...pushBucket(parcial),
-    ...pushBucket(resto),
-    ...pushBucket(ejecutadoB),
-    ...pushBucket(rechazadoB)
-  ];
+  return autorizado.map((item) => ({
+    kind: 'data',
+    row: item.row,
+    bg: bgForEstadoZona(item.estadoNorm, item.zoneKey),
+    zoneKey: item.zoneKey,
+    zoneLabel: item.zoneLabel,
+    needsDistrito: item.needsDistrito
+  }));
 }
 
 function countRowsByZone(rows, getDistritoOverride) {
@@ -533,7 +499,7 @@ const ESTADO_TAB_ORDER = [
 ];
 
 const ESTADO_TAB_LABEL = {
-  [ESTADO_TAB.ALL]: 'Todas las filas',
+  [ESTADO_TAB.ALL]: 'Autorizados por zona',
   [ESTADO_TAB.AUTORIZADO]: 'Autorizado',
   [ESTADO_TAB.PARCIAL]: 'Atendido parcialmente',
   [ESTADO_TAB.EJECUTADO]: 'Ejecutado',
@@ -541,8 +507,8 @@ const ESTADO_TAB_LABEL = {
   [ESTADO_TAB.SIN_ESTADO]: 'Sin estado'
 };
 
-/** Tras zonas: quitar filtro de estado + Ejecutado + Rechazado (siempre hay salida si el filtro vacía todo). */
-const ESTADO_FILTROS_EN_BARRA = [ESTADO_TAB.ALL, ESTADO_TAB.EJECUTADO, ESTADO_TAB.RECHAZADO];
+/** Tras zonas: solo Ejecutado y Rechazado (no dependen del distrito). */
+const ESTADO_FILTROS_EN_BARRA = [ESTADO_TAB.EJECUTADO, ESTADO_TAB.RECHAZADO];
 
 const ESTADO_TAB_ACCENT = {
   [ESTADO_TAB.ALL]: '#64748b',
@@ -554,8 +520,8 @@ const ESTADO_TAB_ACCENT = {
 };
 
 function rowMatchesEstadoTab(row, tabKey) {
-  if (tabKey === ESTADO_TAB.ALL) return true;
   const n = canonicalEstadoKey(row.estado);
+  if (tabKey === ESTADO_TAB.ALL) return n === ESTADO_TAB.AUTORIZADO;
   if (tabKey === ESTADO_TAB.SIN_ESTADO) return n === '';
   return n === tabKey;
 }
@@ -816,9 +782,8 @@ function LogisticsTable({
                 {emptyBecauseEstadoFilter ? (
                   <div className="flex flex-col items-center gap-2">
                     <p className="text-gray-800 max-w-md">
-                      Con el filtro <strong>Ejecutado</strong> o <strong>Rechazado</strong> activo no hay filas que
-                      coincidan en este archivo (o ese texto no se reconoció como estado). Pulse{' '}
-                      <strong>Todas las filas</strong> arriba o aquí para volver al listado normal.
+                      No hay filas con estado <strong>Ejecutado</strong> o <strong>Rechazado</strong> para este
+                      archivo/filtro. Pulse aquí para volver al flujo por zonas (solo autorizados).
                     </p>
                     {typeof onClearEstadoFilter === 'function' ? (
                       <button
@@ -826,14 +791,13 @@ function LogisticsTable({
                         className="px-3 py-1.5 text-xs font-semibold rounded-md bg-primary-600 text-white hover:bg-primary-700 shadow-sm"
                         onClick={onClearEstadoFilter}
                       >
-                        Ver todas las filas
+                        Volver a zonas autorizadas
                       </button>
                     ) : null}
                   </div>
                 ) : (
                   <span>
-                    No hay filas de datos válidas o el archivo no trae todas las columnas requeridas. Si acaba de
-                    subir el Excel con estados ejecutado/rechazado y ve (0), use &quot;Todas las filas&quot;.
+                    No hay filas de datos válidas o el archivo no trae todas las columnas requeridas.
                   </span>
                 )}
               </td>
@@ -845,7 +809,7 @@ function LogisticsTable({
                 className="px-3 py-6 text-xs text-gray-600 text-center"
                 style={{ border: 'none' }}
               >
-                No hay pedidos en esta zona con los filtros actuales.
+                No hay pedidos autorizados en esta zona.
               </td>
             </tr>
           ) : (
@@ -1032,27 +996,34 @@ function LogisticsSheetWithZoneTabs({
     sheet.logisticsRows
   ]);
 
-  const filtrosBarraIds = useMemo(() => new Set([ESTADO_TAB.ALL, ...ESTADO_FILTROS_EN_BARRA]), []);
-
   const displayEstadoTab = useMemo(() => {
-    if (!filtrosBarraIds.has(activeEstadoTab)) {
-      return ESTADO_TAB.ALL;
+    if (activeEstadoTab === ESTADO_TAB.EJECUTADO || activeEstadoTab === ESTADO_TAB.RECHAZADO) {
+      return activeEstadoTab;
     }
-    return activeEstadoTab;
-  }, [filtrosBarraIds, activeEstadoTab]);
+    return ESTADO_TAB.ALL;
+  }, [activeEstadoTab]);
 
-  const rowsPorEstado = useMemo(
-    () => filterRowsByEstadoTab(sheet.logisticsRows, displayEstadoTab),
-    [sheet.logisticsRows, displayEstadoTab]
+  /** Base de zonas: solo autorizados (regla principal). */
+  const rowsAutorizados = useMemo(
+    () => filterRowsByEstadoTab(sheet.logisticsRows, ESTADO_TAB.ALL),
+    [sheet.logisticsRows]
   );
 
-  const sheetFiltrado = useMemo(() => ({ ...sheet, logisticsRows: rowsPorEstado }), [
+  /** En pestañas Ejecutado/Rechazado mostramos únicamente ese estado, sin distrito. */
+  const rowsEstadoEspecial = useMemo(() => {
+    if (displayEstadoTab === ESTADO_TAB.EJECUTADO || displayEstadoTab === ESTADO_TAB.RECHAZADO) {
+      return filterRowsByEstadoTab(sheet.logisticsRows, displayEstadoTab);
+    }
+    return rowsAutorizados;
+  }, [sheet.logisticsRows, displayEstadoTab, rowsAutorizados]);
+
+  const sheetFiltrado = useMemo(() => ({ ...sheet, logisticsRows: rowsEstadoEspecial }), [
     sheet,
-    rowsPorEstado
+    rowsEstadoEspecial
   ]);
 
-  const counts = useMemo(() => countRowsByZone(rowsPorEstado, getDistritoOverride), [
-    rowsPorEstado,
+  const counts = useMemo(() => countRowsByZone(rowsAutorizados, getDistritoOverride), [
+    rowsAutorizados,
     getDistritoOverride
   ]);
 
@@ -1087,14 +1058,12 @@ function LogisticsSheetWithZoneTabs({
       */}
       <div className="sticky top-16 z-[28] -mx-6 px-6 py-3 mb-3 bg-gray-50/98 backdrop-blur-md border-b border-gray-200 shadow-md space-y-2.5">
         <p className="text-[11px] text-gray-600 leading-snug">
-          Orden: <strong>Zonas Lima/Callao</strong> según distrito, luego <strong>Provincia</strong> y{' '}
-          <strong>Sin clasificar</strong> para indicar distrito con la chincheta y clasificar. Al final de la
-          barra: <strong>Ejecutado</strong> y <strong>Rechazado</strong> (filtro por estado). Dentro de cada
-          zona se listan los pedidos habituales junto con autorizado y atendido parcial; no hace falta un botón
-          Autorizado si ya está clasificado por distrito. En <strong>Ejecutado</strong> y{' '}
-          <strong>Rechazado</strong> solo verá una tabla de lectura (fecha, vendedor, cliente, cantidades,
-          destino, estado). Use <strong>Todas las filas</strong> para quitar el filtro cuando no haya datos en
-          esas vistas. Los distritos manuales se guardan en este navegador entre archivos.
+          En pestañas de <strong>distrito/zona</strong> (incluyendo <strong>Sin clasificar</strong>) solo se
+          muestran pedidos con estado <strong>Autorizado</strong>. Si una dirección no tiene distrito, puede
+          colocarlo con la chincheta para que pase a su zona correspondiente. Las pestañas{' '}
+          <strong>Ejecutado</strong> y <strong>Rechazado</strong> ignoran distrito/provincia/callao y muestran
+          solo sus registros en tabla de lectura (fecha, vendedor, cliente, producto, cantidad, atendido,
+          pendiente, destino, estado).
         </p>
         <div
           className="flex flex-wrap items-center gap-x-2 gap-y-2 pt-2"
@@ -1187,7 +1156,7 @@ function LogisticsSheetWithZoneTabs({
         vistaLecturaSoloEstado={vistaLecturaSoloEstado}
         emptyBecauseEstadoFilter={
           sheet.logisticsRows.length > 0 &&
-          rowsPorEstado.length === 0 &&
+          rowsEstadoEspecial.length === 0 &&
           displayEstadoTab !== ESTADO_TAB.ALL
         }
         onClearEstadoFilter={() => setActiveEstadoTab(ESTADO_TAB.ALL)}
